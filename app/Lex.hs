@@ -25,7 +25,18 @@ import Text.Regex.TDFA (getAllMatches, (=~))
 
 data Keyword = KInt | KVoid | KReturn deriving (Show, Eq)
 
-data Token = Identifier String | Keyword Keyword | Constant Int | LParen | RParen | LBrace | RBrace | Semicolon deriving (Show, Eq)
+data Token
+  = Identifier String
+  | Keyword Keyword
+  | Constant Int
+  | LParen
+  | RParen
+  | LBrace
+  | RBrace
+  | Semicolon
+  | SinglelineComment String
+  | MultilineComment String
+  deriving (Show, Eq)
 
 data TokenMeta = TokenMeta {re :: String, name :: String} deriving (Show, Eq)
 
@@ -35,7 +46,7 @@ intMeta = TokenMeta {re = "int\\b", name = "int"}
 
 voidMeta = TokenMeta {re = "void\\b", name = "void"}
 
-constMeta = TokenMeta {re = "[0-9]+", name = "const"}
+constMeta = TokenMeta {re = "[0-9]+\\b", name = "const"}
 
 lparenMeta = TokenMeta {re = "\\(", name = "lparen"}
 
@@ -47,7 +58,32 @@ rbraceMeta = TokenMeta {re = "}", name = "rbrace"}
 
 semicolonMeta = TokenMeta {re = ";", name = "semicolon"}
 
-tokenMeta = [identMeta, intMeta, voidMeta, constMeta, lparenMeta, rparenMeta, lbraceMeta, rbraceMeta, semicolonMeta]
+-- (
+--            "multi_line_comment",
+--            Regex::new(r"(?s)/\*.*?\*/").expect("multiline comment regex did not compile")
+--        ),
+--        (
+--            "single_line_comment",
+--            Regex::new(r"//.*").expect("single line comment regex did not compile")
+--        )
+
+singleLineCommentMeta = TokenMeta {re = "//.*", name = "single_line_comment"}
+
+multilineCommentMeta = TokenMeta {re = "[:space:]*/\\*.*\\*/", name = "multi_line_comment"}
+
+tokenMeta =
+  [ identMeta,
+    intMeta,
+    voidMeta,
+    constMeta,
+    lparenMeta,
+    rparenMeta,
+    lbraceMeta,
+    rbraceMeta,
+    semicolonMeta,
+    singleLineCommentMeta,
+    multilineCommentMeta
+  ]
 
 data MatchToken = MatchToken String Token
 
@@ -92,6 +128,8 @@ longestMatchFromStart input = case longestMatch of
         "lbrace" -> Just (LBrace, length match)
         "rbrace" -> Just (RBrace, length match)
         "semicolon" -> Just (Semicolon, length match)
+        "single_line_comment" -> Just (SinglelineComment match, length match)
+        "multi_line_comment" -> Just (MultilineComment match, length match)
         _ -> Nothing
       Nothing -> Nothing
       where
