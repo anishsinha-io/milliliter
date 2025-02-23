@@ -1,97 +1,37 @@
-module Lex
-  ( longestMatchFromStart,
-    isFullMatch,
-    flexibleMatchStart,
-    identMeta,
-    intMeta,
-    voidMeta,
-    constMeta,
-    lparenMeta,
-    rparenMeta,
-    lbraceMeta,
-    rbraceMeta,
-    semicolonMeta,
-    tokenMeta,
-    TokenMeta (..),
-    Token (..),
-    Keyword (..),
-    tokenize,
-  )
-where
+module Lex (Token (..), matchIdentOrKeyword, tokenize, lstrip) where
 
-import Data.Maybe (fromJust, isJust)
-import Data.Text (pack, strip, unpack)
+import Control.Monad.State (State, runState, state)
+import Data.List (maximumBy)
+import Data.Ord (comparing)
 import Text.Regex.TDFA (getAllMatches, (=~))
 
-data Keyword = KInt | KVoid | KReturn deriving (Show, Eq)
-
 data Token
-  = Identifier String
-  | Keyword Keyword
-  | Constant Int
+  = Const Int
+  | Identifier String
+  | Keyword String
   | LParen
   | RParen
   | LBrace
   | RBrace
   | Semicolon
-  | SinglelineComment String
-  | MultilineComment String
+  | SingleLineComment String
+  | MultiLineComment String
   deriving (Show, Eq)
 
-data TokenMeta = TokenMeta {re :: String, name :: String} deriving (Show, Eq)
+data LexError = UnexpectedEOF deriving (Show, Eq)
 
-identMeta = TokenMeta {re = "[a-zA-Z_]([a-zA-Z0-9_])*([:space:])*", name = "ident"}
-
-intMeta = TokenMeta {re = "int\\b", name = "int"}
-
-voidMeta = TokenMeta {re = "void\\b", name = "void"}
-
-constMeta = TokenMeta {re = "[0-9]+\\b", name = "const"}
-
-lparenMeta = TokenMeta {re = "\\(", name = "lparen"}
-
-rparenMeta = TokenMeta {re = "\\)", name = "rparen"}
-
-lbraceMeta = TokenMeta {re = "{", name = "lbrace"}
-
-rbraceMeta = TokenMeta {re = "}", name = "rbrace"}
-
-semicolonMeta = TokenMeta {re = ";", name = "semicolon"}
-
--- (
---            "multi_line_comment",
---            Regex::new(r"(?s)/\*.*?\*/").expect("multiline comment regex did not compile")
---        ),
---        (
---            "single_line_comment",
---            Regex::new(r"//.*").expect("single line comment regex did not compile")
---        )
-
-singleLineCommentMeta = TokenMeta {re = "//.*", name = "single_line_comment"}
-
-multilineCommentMeta = TokenMeta {re = "[:space:]*/\\*.*\\*/", name = "multi_line_comment"}
-
-tokenMeta =
-  [ identMeta,
-    intMeta,
-    voidMeta,
-    constMeta,
-    lparenMeta,
-    rparenMeta,
-    lbraceMeta,
-    rbraceMeta,
-    semicolonMeta,
-    singleLineCommentMeta,
-    multilineCommentMeta
-  ]
-
-data MatchToken = MatchToken String Token
-
-instance Eq MatchToken where
-  (MatchToken m1 t1) == (MatchToken m2 t2) = m1 == m2 && t1 == t2
-
-instance Ord MatchToken where
-  (MatchToken m1 _) <= (MatchToken m2 _) = length m1 <= length m2
+length' :: Token -> Int
+length' tok = case tok of
+  Const val -> length $ show val
+  Identifier ident -> length ident
+  Keyword kw -> length kw
+  LParen -> 1
+  RParen -> 1
+  LBrace -> 1
+  RBrace -> 1
+  Semicolon -> 1
+  SingleLineComment comment -> length comment
+  MultiLineComment comment -> length comment
 
 isFullMatch :: String -> String -> Bool
 isFullMatch re str =
@@ -108,42 +48,68 @@ flexibleMatchStart re str =
     slice :: Int -> Int -> [a] -> [a]
     slice from to = take (to - from + 1)
 
-longestMatchFromStart :: String -> Either String (Token, Int)
-longestMatchFromStart input = case longestMatch of
-  Just (tok, len) -> Right (tok, len)
-  Nothing -> Left $ "No token matched from start of string: " ++ input
+longest :: [Token] -> Maybe Token
+longest [] = Nothing
+longest lst = Just $ maximumBy (comparing length') lst
+
+matchIdentOrKeyword,
+  matchConst,
+  matchLParen,
+  matchRParen,
+  matchLBrace,
+  matchRBrace,
+  matchSemicolon,
+  matchSingleLineComment,
+  matchMultiLineComment ::
+    String -> Maybe Token
+matchIdentOrKeyword input =
+  flexibleMatchStart "[a-zA-Z_]([a-zA-Z0-9_])*([:space:])*" input >>= \match ->
+    case matchKeyword match of
+      (Just kw) -> Just kw
+      _ -> Just $ Identifier match
   where
-    longestMatch = maximum' [m | tok <- tokenMeta, Just m <- [go tok input]]
+    matchKeyword :: String -> Maybe Token
+    matchKeyword ident = longest [m | f <- [matchVoid, matchInt], Just m <- [f ident]]
 
-    go :: TokenMeta -> String -> Maybe (Token, Int)
-    go (TokenMeta re name) input = case match of
-      Just match -> case name of
-        "ident" -> Just (Identifier match, length match)
-        "const" -> Just (Constant $ read match, length match)
-        "void" -> Just (Keyword KVoid, length match)
-        "int" -> Just (Keyword KInt, length match)
-        "return" -> Just (Keyword KReturn, length match)
-        "lparen" -> Just (LParen, length match)
-        "rparen" -> Just (RParen, length match)
-        "lbrace" -> Just (LBrace, length match)
-        "rbrace" -> Just (RBrace, length match)
-        "semicolon" -> Just (Semicolon, length match)
-        "single_line_comment" -> Just (SinglelineComment match, length match)
-        "multi_line_comment" -> Just (MultilineComment match, length match)
-        _ -> Nothing
-      Nothing -> Nothing
-      where
-        match = flexibleMatchStart re input
+    matchVoid ident = flexibleMatchStart "void\\b" ident >>= \match -> Just $ Keyword "void"
+    matchInt ident = flexibleMatchStart "int\\b" ident >>= \match -> Just $ Keyword "int"
+matchConst input = flexibleMatchStart "[0-9]+\\b" input >>= \match -> Just $ Const $ read match
+matchLParen input = flexibleMatchStart "\\(" input >> Just LParen
+matchRParen input = flexibleMatchStart "\\)" input >> Just RParen
+matchLBrace input = flexibleMatchStart "{" input >> Just LBrace
+matchRBrace input = flexibleMatchStart "}" input >> Just RBrace
+matchSemicolon input = flexibleMatchStart ";" input >> Just Semicolon
+matchSingleLineComment input = flexibleMatchStart "//.*" input >>= \match -> Just $ SingleLineComment match
+matchMultiLineComment input = flexibleMatchStart "[:space:]*/\\*.*\\*/" input >>= \match -> Just $ MultiLineComment match
 
-    maximum' :: [(Token, Int)] -> Maybe (Token, Int)
-    maximum' [] = Nothing
-    maximum' lst = Just $ foldr1 (\f@(tok1, len1) s@(tok2, len2) -> if len1 > len2 then f else s) lst
-
-tokenize :: String -> Either (String, [Token]) [Token]
-tokenize input = tokenize' [] input
+lstrip :: String -> String
+lstrip "" = ""
+lstrip input = dropWhile isWhitespace input
   where
-    tokenize' :: [Token] -> String -> Either (String, [Token]) [Token]
-    tokenize' lst "" = Right lst
-    tokenize' lst input = case longestMatchFromStart $ unpack $ strip $ pack input of
-      Left e -> Left (e, lst)
-      Right (tok, len) -> tokenize' (lst ++ [tok]) (drop len (unpack $ strip $ pack input))
+    isWhitespace input = input == ' ' || input == '\t' || input == '\n'
+
+tokenize :: String -> Either (LexError, [Token]) [Token]
+tokenize input = go [] (lstrip input)
+  where
+    go :: [Token] -> String -> Either (LexError, [Token]) [Token]
+    go lst "" = Right lst
+    go lst input = case munch input of
+      Just tok -> go (lst ++ [tok]) (lstrip $ drop (length' tok) input)
+      Nothing -> Left (UnexpectedEOF, lst)
+
+    munch s =
+      longest
+        [ m
+          | f <-
+              [ matchIdentOrKeyword,
+                matchConst,
+                matchLParen,
+                matchRParen,
+                matchLBrace,
+                matchRBrace,
+                matchSemicolon,
+                matchSingleLineComment,
+                matchMultiLineComment
+              ],
+            Just m <- [f s]
+        ]
