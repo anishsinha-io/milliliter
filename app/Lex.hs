@@ -1,58 +1,44 @@
-module Lex (Token (..), matchIdentOrKeyword, tokenize, lstrip) where
+module Lex
+  ( Token (..),
+    tokenize,
+    -- lstrip,
+  )
+where
 
-import Control.Monad.State (State, runState, state)
-import Data.List (maximumBy)
-import Data.Ord (comparing)
-import Text.Regex.TDFA (getAllMatches, (=~))
+import Data.List (sortBy)
+import Data.Maybe (catMaybes)
+import Data.Text (pack, stripStart, unpack)
+import Text.Regex.TDFA ((=~))
 
 data Token
-  = Const Int
-  | Identifier String
-  | Keyword String
-  | LParen
-  | RParen
-  | LBrace
-  | RBrace
-  | Semicolon
-  | SingleLineComment String
-  | MultiLineComment String
+  = TConst Int
+  | TIdentifier String
+  | TKeyword String
+  | TKeywordInt
+  | TKeywordVoid
+  | TKeywordFloat
+  | TKeywordReturn
+  | TLParen
+  | TRParen
+  | TLBrace
+  | TRBrace
+  | TSemicolon
+  | TSingleLineComment String
+  | TMultiLineComment String
+  | TMinusMinus
+  | TPlusPlus
+  | TAdd
+  | TSub
+  | TDeref
+  | TMult
+  | TDiv
+  | TMod
   deriving (Show, Eq)
 
-data LexError = UnexpectedEOF deriving (Show, Eq)
+lstrip = unpack . stripStart . pack
 
-length' :: Token -> Int
-length' tok = case tok of
-  Const val -> length $ show val
-  Identifier ident -> length ident
-  Keyword kw -> length kw
-  LParen -> 1
-  RParen -> 1
-  LBrace -> 1
-  RBrace -> 1
-  Semicolon -> 1
-  SingleLineComment comment -> length comment
-  MultiLineComment comment -> length comment
-
-isFullMatch :: String -> String -> Bool
-isFullMatch re str =
-  let matches = getAllMatches (str =~ re) :: [(Int, Int)]; len = length matches; identLen = length str
-   in ((len == 1) && (identLen == snd (head matches)))
-
-flexibleMatchStart :: String -> String -> Maybe String
-flexibleMatchStart re str =
-  let matches = getAllMatches (str =~ re) :: [(Int, Int)]
-   in case matches of
-        [] -> Nothing
-        (start, len) : _ -> if start == 0 then Just $ slice 0 (len - 1) str else Nothing
-  where
-    slice :: Int -> Int -> [a] -> [a]
-    slice from to = take (to - from + 1)
-
-longest :: [Token] -> Maybe Token
-longest [] = Nothing
-longest lst = Just $ maximumBy (comparing length') lst
-
-matchIdentOrKeyword,
+matchKeyword,
+  matchIdent,
   matchConst,
   matchLParen,
   matchRParen,
@@ -61,55 +47,87 @@ matchIdentOrKeyword,
   matchSemicolon,
   matchSingleLineComment,
   matchMultiLineComment ::
-    String -> Maybe Token
-matchIdentOrKeyword input =
-  flexibleMatchStart "[a-zA-Z_]([a-zA-Z0-9_])*([:space:])*" input >>= \match ->
-    case matchKeyword match of
-      (Just kw) -> Just kw
-      _ -> Just $ Identifier match
+    String -> (Maybe Token, String)
+matchKeyword s = result
   where
-    matchKeyword :: String -> Maybe Token
-    matchKeyword ident = longest [m | f <- [matchVoid, matchInt], Just m <- [f ident]]
+    match :: String -> Token -> (Maybe Token, String)
+    match re tok = case s =~ re :: (String, String, String) of
+      ("", match, rest) -> (Just tok, rest)
+      _ -> (Nothing, s)
 
-    matchVoid ident = flexibleMatchStart "void\\b" ident >>= \match -> Just $ Keyword "void"
-    matchInt ident = flexibleMatchStart "int\\b" ident >>= \match -> Just $ Keyword "int"
-matchConst input = flexibleMatchStart "[0-9]+\\b" input >>= \match -> Just $ Const $ read match
-matchLParen input = flexibleMatchStart "\\(" input >> Just LParen
-matchRParen input = flexibleMatchStart "\\)" input >> Just RParen
-matchLBrace input = flexibleMatchStart "{" input >> Just LBrace
-matchRBrace input = flexibleMatchStart "}" input >> Just RBrace
-matchSemicolon input = flexibleMatchStart ";" input >> Just Semicolon
-matchSingleLineComment input = flexibleMatchStart "//.*" input >>= \match -> Just $ SingleLineComment match
-matchMultiLineComment input = flexibleMatchStart "[:space:]*/\\*.*\\*/" input >>= \match -> Just $ MultiLineComment match
+    fns = [match "int\\b" TKeywordInt, match "void\\b" TKeywordVoid, match "float\\b" TKeywordFloat, match "return\\b" TKeywordReturn]
 
-lstrip :: String -> String
-lstrip "" = ""
-lstrip input = dropWhile isWhitespace input
+    result = case [(x, y) | (Just x, y) <- sortBy (\a b -> compare (length (snd a)) (length (snd b))) fns] of
+      [] -> (Nothing, s)
+      ((x, y) : _) -> (Just x, lstrip y)
+matchIdent s = result
   where
-    isWhitespace input = input == ' ' || input == '\t' || input == '\n'
+    match :: String -> (Maybe Token, String)
+    match re = case s =~ re :: (String, String, String) of
+      ("", match, rest) -> (Just $ TIdentifier match, lstrip rest)
+      _ -> (Nothing, s)
 
-tokenize :: String -> Either (LexError, [Token]) [Token]
-tokenize input = go [] (lstrip input)
+    result = case matchKeyword s of
+      (Just kw, rest) -> (Nothing, s)
+      (Nothing, _) ->
+        let (mi, r) = match "[a-zA-Z_]([a-zA-Z0-9_])*([:space:])*"
+         in case mi of
+              Just ident -> (Just ident, r)
+              Nothing -> (Nothing, s)
+matchConst s = case s =~ "[0-9]+\\b" :: (String, String, String) of
+  ("", match, rest) -> (Just $ TConst (read match), lstrip rest)
+  _ -> (Nothing, s)
+matchLParen s = case s =~ "\\(" :: (String, String, String) of
+  ("", match, rest) -> (Just TLParen, lstrip rest)
+  _ -> (Nothing, s)
+matchRParen s = case s =~ "\\)" :: (String, String, String) of
+  ("", match, rest) -> (Just TRParen, lstrip rest)
+  _ -> (Nothing, s)
+matchLBrace s = case s =~ "{" :: (String, String, String) of
+  ("", match, rest) -> (Just TLBrace, lstrip rest)
+  _ -> (Nothing, s)
+matchRBrace s = case s =~ "}" :: (String, String, String) of
+  ("", match, rest) -> (Just TLBrace, lstrip rest)
+  _ -> (Nothing, s)
+matchSemicolon s = case s =~ ";" :: (String, String, String) of
+  ("", match, rest) -> (Just TSemicolon, lstrip rest)
+  _ -> (Nothing, s)
+matchSingleLineComment s = case s =~ "//.*" :: (String, String, String) of
+  ("", match, rest) -> (Just $ TSingleLineComment match, lstrip rest)
+  _ -> (Nothing, s)
+matchMultiLineComment s = case s =~ "[:space:]*/\\*.*\\*/" :: (String, String, String) of
+  ("", match, rest) -> (Just $ TMultiLineComment match, lstrip rest)
+  _ -> (Nothing, s)
+
+data LexError = UnrecognizedToken String deriving (Eq, Show)
+
+tokenize :: String -> Either LexError [Token]
+tokenize s = result
   where
-    go :: [Token] -> String -> Either (LexError, [Token]) [Token]
-    go lst "" = Right lst
-    go lst input = case munch input of
-      Just tok -> go (lst ++ [tok]) (lstrip $ drop (length' tok) input)
-      Nothing -> Left (UnexpectedEOF, lst)
+    matches =
+      let s' = lstrip s
+       in [ matchKeyword s',
+            matchIdent s',
+            matchConst s',
+            matchLParen s',
+            matchRParen s',
+            matchLBrace s',
+            matchRBrace s',
+            matchSemicolon s',
+            matchSingleLineComment s',
+            matchMultiLineComment s'
+          ]
 
-    munch s =
-      longest
-        [ m
-          | f <-
-              [ matchIdentOrKeyword,
-                matchConst,
-                matchLParen,
-                matchRParen,
-                matchLBrace,
-                matchRBrace,
-                matchSemicolon,
-                matchSingleLineComment,
-                matchMultiLineComment
-              ],
-            Just m <- [f s]
-        ]
+    match = case [(x, y) | (Just x, y) <- sortBy (\a b -> compare (length (snd a)) (length (snd b))) matches] of
+      [] -> (Nothing, s)
+      ((x, y) : _) -> (Just x, lstrip y)
+
+    result = case match of
+      (Just tok, "") -> Right [tok]
+      (Just tok, rest) -> case tokenize rest of
+        (Right tokens) -> Right (tok : tokens)
+        e -> e
+      (_, rest) -> Left (UnrecognizedToken rest)
+
+inject :: (String -> (Maybe Token, String)) -> ((Maybe Token, String) -> (Maybe Token, String))
+inject f (_, s) = f s
